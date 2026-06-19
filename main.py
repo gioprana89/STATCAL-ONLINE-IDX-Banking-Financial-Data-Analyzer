@@ -334,36 +334,6 @@ def compute_grouped_descriptive_statistics(
     return result
 
 
-@st.cache_data(ttl=3600, max_entries=20)
-def compute_correlation_matrix(
-    df: pd.DataFrame,
-    numeric_cols: List[str],
-    method: str,
-    decimal_digits: int,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    numeric_df = pd.DataFrame({col: to_numeric_series(df[col]) for col in numeric_cols})
-    corr = numeric_df.corr(method=method.lower())
-
-    pvals = pd.DataFrame(np.nan, index=numeric_cols, columns=numeric_cols)
-    for row_var in numeric_cols:
-        for col_var in numeric_cols:
-            x = numeric_df[row_var]
-            y = numeric_df[col_var]
-            valid = pd.concat([x, y], axis=1).dropna()
-            if len(valid) < 3:
-                continue
-            try:
-                if method.lower() == "pearson":
-                    _, p = stats.pearsonr(valid.iloc[:, 0], valid.iloc[:, 1])
-                else:
-                    _, p = stats.spearmanr(valid.iloc[:, 0], valid.iloc[:, 1])
-                pvals.loc[row_var, col_var] = p
-            except Exception:
-                pvals.loc[row_var, col_var] = np.nan
-
-    return corr.round(decimal_digits), pvals.round(decimal_digits)
-
-
 # =====================================================
 # LINE CHART
 # =====================================================
@@ -565,247 +535,6 @@ def create_panel_mean_line_chart(
         fig.tight_layout(rect=[0, 0, 1, 0.93])
 
     return fig
-
-
-# =====================================================
-# SCATTERPLOT
-# =====================================================
-
-@st.cache_data(ttl=3600, max_entries=20)
-def build_scatter_correlation_table(
-    df: pd.DataFrame,
-    dependent_col: str,
-    independent_cols: List[str],
-    method: str,
-    decimal_digits: int,
-) -> pd.DataFrame:
-    rows = []
-    y = to_numeric_series(df[dependent_col])
-    for x_col in independent_cols:
-        x = to_numeric_series(df[x_col])
-        valid = pd.concat([x, y], axis=1).dropna()
-        if len(valid) < 3:
-            corr_value = np.nan
-            p_value = np.nan
-        else:
-            try:
-                if method.lower() == "pearson":
-                    corr_value, p_value = stats.pearsonr(valid.iloc[:, 0], valid.iloc[:, 1])
-                else:
-                    corr_value, p_value = stats.spearmanr(valid.iloc[:, 0], valid.iloc[:, 1])
-            except Exception:
-                corr_value = np.nan
-                p_value = np.nan
-        rows.append({
-            "Dependent Variable": dependent_col,
-            "Independent Variable": x_col,
-            "Correlation Method": method,
-            "N": len(valid),
-            "Correlation": corr_value,
-            "p-value": p_value,
-        })
-    result = pd.DataFrame(rows)
-    for col in ["Correlation", "p-value"]:
-        result[col] = result[col].round(decimal_digits)
-    return result
-
-
-def create_scatterplot_panel(
-    df: pd.DataFrame,
-    dependent_col: str,
-    independent_cols: List[str],
-    color_col: str,
-    label_col: str,
-    title: str,
-    subtitle: str,
-    figure_width: float,
-    figure_height: float,
-    panel_columns: int,
-    theme_name: str,
-    font_family: str,
-    palette_name: str,
-    marker_style: str,
-    marker_size: int,
-    marker_alpha: float,
-    show_labels: bool,
-    label_font_size: int,
-    add_regression_line: bool,
-    title_font_size: int,
-    subtitle_font_size: int,
-    axis_font_size: int,
-    tick_font_size: int,
-    panel_title_font_size: int,
-    legend_font_size: int,
-    show_grid: bool,
-) -> plt.Figure:
-    plt.rcParams["font.family"] = font_family
-    theme = get_theme(theme_name)
-    palette = get_palette_color_list(palette_name)
-
-    n_panels = len(independent_cols)
-    ncols = max(1, min(panel_columns, n_panels))
-    nrows = math.ceil(n_panels / ncols)
-
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figure_width, figure_height), squeeze=False)
-    fig.patch.set_facecolor(theme["figure_facecolor"])
-
-    use_color = color_col != "None" and color_col in df.columns
-    if use_color:
-        categories = sorted_unique_values(df[color_col])
-        color_map = {str(cat): palette[idx % len(palette)] for idx, cat in enumerate(categories)}
-    else:
-        categories = ["All"]
-        color_map = {"All": palette[0]}
-
-    legend_handles = {}
-    y_all = to_numeric_series(df[dependent_col])
-
-    for idx, x_col in enumerate(independent_cols):
-        row = idx // ncols
-        col = idx % ncols
-        ax = axes[row][col]
-        x_all = to_numeric_series(df[x_col])
-
-        plot_df = df.copy()
-        plot_df["__x__"] = x_all
-        plot_df["__y__"] = y_all
-        plot_df = plot_df.dropna(subset=["__x__", "__y__"])
-
-        if use_color:
-            for cat in categories:
-                temp = plot_df[plot_df[color_col].astype(str) == str(cat)]
-                if temp.empty:
-                    continue
-                sc = ax.scatter(
-                    temp["__x__"],
-                    temp["__y__"],
-                    s=marker_size,
-                    marker=marker_style,
-                    alpha=marker_alpha,
-                    color=color_map[str(cat)],
-                    edgecolor="white",
-                    linewidth=0.5,
-                    label=str(cat),
-                )
-                if str(cat) not in legend_handles:
-                    legend_handles[str(cat)] = sc
-        else:
-            sc = ax.scatter(
-                plot_df["__x__"],
-                plot_df["__y__"],
-                s=marker_size,
-                marker=marker_style,
-                alpha=marker_alpha,
-                color=palette[0],
-                edgecolor="white",
-                linewidth=0.5,
-                label="All",
-            )
-            legend_handles["All"] = sc
-
-        if add_regression_line and len(plot_df) >= 2:
-            try:
-                x_values = plot_df["__x__"].to_numpy(dtype=float)
-                y_values = plot_df["__y__"].to_numpy(dtype=float)
-                slope, intercept = np.polyfit(x_values, y_values, 1)
-                order = np.argsort(x_values)
-                ax.plot(x_values[order], intercept + slope * x_values[order], color=theme["spine_color"], linewidth=1.2, linestyle="--")
-            except Exception:
-                pass
-
-        if show_labels and label_col != "None" and label_col in df.columns:
-            for _, r in plot_df.iterrows():
-                ax.annotate(
-                    str(r[label_col]),
-                    (r["__x__"], r["__y__"]),
-                    textcoords="offset points",
-                    xytext=(4, 4),
-                    ha="left",
-                    fontsize=label_font_size,
-                    color=theme["text_color"],
-                )
-
-        ax.set_title(f"{x_col} vs {dependent_col}", fontsize=panel_title_font_size, fontweight="bold", color=theme["text_color"], pad=10)
-        ax.set_xlabel(x_col, fontsize=axis_font_size, color=theme["text_color"])
-        ax.set_ylabel(dependent_col, fontsize=axis_font_size, color=theme["text_color"])
-        ax.tick_params(axis="both", labelsize=tick_font_size, colors=theme["text_color"])
-        apply_common_chart_style(ax, theme, show_grid)
-
-    for idx in range(n_panels, nrows * ncols):
-        row = idx // ncols
-        col = idx % ncols
-        axes[row][col].axis("off")
-
-    fig.suptitle(title, fontsize=title_font_size, fontweight="bold", color=theme["text_color"], y=0.995)
-    if subtitle.strip():
-        fig.text(0.5, 0.965, subtitle, ha="center", va="top", fontsize=subtitle_font_size, color=theme["text_color"])
-
-    if legend_handles and use_color:
-        legend = fig.legend(
-            list(legend_handles.values()),
-            list(legend_handles.keys()),
-            loc="upper left",
-            bbox_to_anchor=(1.005, 0.94),
-            frameon=True,
-            fontsize=legend_font_size,
-        )
-        legend.get_frame().set_alpha(0.88)
-        for text in legend.get_texts():
-            text.set_color(theme["text_color"])
-        fig.tight_layout(rect=[0, 0, 0.86, 0.93])
-    else:
-        fig.tight_layout(rect=[0, 0, 1, 0.93])
-
-    return fig
-
-
-# =====================================================
-# CORRELATION HEATMAP
-# =====================================================
-
-def create_correlation_heatmap(
-    corr: pd.DataFrame,
-    title: str,
-    figure_width: float,
-    figure_height: float,
-    cmap: str,
-    theme_name: str,
-    font_family: str,
-    title_font_size: int,
-    tick_font_size: int,
-    value_font_size: int,
-    show_values: bool,
-) -> plt.Figure:
-    plt.rcParams["font.family"] = font_family
-    theme = get_theme(theme_name)
-    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
-    fig.patch.set_facecolor(theme["figure_facecolor"])
-    ax.set_facecolor(theme["axes_facecolor"])
-
-    im = ax.imshow(corr.values, cmap=cmap, vmin=-1, vmax=1)
-    ax.set_title(title, fontsize=title_font_size, fontweight="bold", color=theme["text_color"], pad=12)
-
-    ax.set_xticks(np.arange(len(corr.columns)))
-    ax.set_yticks(np.arange(len(corr.index)))
-    ax.set_xticklabels(corr.columns, rotation=45, ha="right", fontsize=tick_font_size, color=theme["text_color"])
-    ax.set_yticklabels(corr.index, fontsize=tick_font_size, color=theme["text_color"])
-
-    if show_values:
-        for i in range(len(corr.index)):
-            for j in range(len(corr.columns)):
-                value = corr.iloc[i, j]
-                color = "white" if abs(value) > 0.55 else "black"
-                ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=value_font_size, color=color)
-
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=tick_font_size, colors=theme["text_color"])
-
-    for spine in ax.spines.values():
-        spine.set_color(theme["spine_color"])
-
-    fig.tight_layout()
-    return fig
-
 
 
 # =====================================================
@@ -1298,8 +1027,8 @@ with st.container():
         st.subheader(APP_TITLE)
         st.caption(
             "A Python Streamlit application for exploring IDX banking financial data through data filtering, "
-            "descriptive statistics, grouped summaries, correlation matrices, publication-ready multi-panel line charts, "
-            "scatterplot panels, linear regression with assumption testing, and exportable analytical outputs."
+            "descriptive statistics, grouped summaries, publication-ready multi-panel line charts, "
+            "linear regression with assumption testing, and exportable analytical outputs."
         )
 
 st.markdown(
@@ -1308,7 +1037,7 @@ st.markdown(
     **STATCAL ONLINE Page:** [{STATCAL_ONLINE_URL}]({STATCAL_ONLINE_URL})  
     **Data Source / Training Data:** [Open Google Drive Folder]({TRAINING_DATA_URL})  
     **{APP_UPDATED}**  
-    **Purpose:** Explore IDX banking financial data by year and ticker code, create descriptive tables, correlation matrices, line charts, scatterplots, regression analysis, assumption tests, and export outputs for academic reporting.
+    **Purpose:** Explore IDX banking financial data by year and ticker code, create descriptive tables, multi-panel line charts, regression analysis, assumption tests, and export outputs for academic reporting.
 
     ---
     """
@@ -1319,15 +1048,13 @@ st.markdown(
 # TABS
 # =====================================================
 
-tab_data, tab_uni, tab_group, tab_corr, tab_line, tab_scatter, tab_regression, tab_export = st.tabs([
+tab_data, tab_uni, tab_group, tab_line, tab_regression, tab_export = st.tabs([
     "1. Data & Filters",
     "2. Univariate Descriptive",
     "3. Grouped Descriptive",
-    "4. Correlation Matrix",
-    "5. Multi-Panel Line Chart",
-    "6. Scatterplot",
-    "7. Regression & Assumption Tests",
-    "8. Export Charts & Excel",
+    "4. Multi-Panel Line Chart",
+    "5. Regression & Assumption Tests",
+    "6. Export Charts & Excel",
 ])
 
 
@@ -1489,72 +1216,7 @@ with tab_group:
 
 
 # =====================================================
-# TAB 4: CORRELATION MATRIX
-# =====================================================
-
-with tab_corr:
-    st.subheader("Correlation Matrix")
-
-    corr_settings_1, corr_settings_2, corr_settings_3 = st.columns([3, 1, 1])
-    with corr_settings_1:
-        corr_numeric_cols = st.multiselect(
-            "Select numeric variables for correlation matrix",
-            numeric_candidates,
-            default=default_numeric_columns(numeric_candidates),
-            key="corr_numeric_cols",
-        )
-    with corr_settings_2:
-        corr_method = st.selectbox("Correlation method", ["Pearson", "Spearman"], index=0)
-    with corr_settings_3:
-        corr_decimal_digits = st.slider("Decimal digits", 0, 8, 3, 1, key="corr_decimal_digits")
-
-    heat_settings = st.expander("Heatmap Settings", expanded=True)
-    with heat_settings:
-        heat_col_1, heat_col_2, heat_col_3 = st.columns(3)
-        with heat_col_1:
-            heat_theme = st.selectbox("Heatmap theme", list(THEMES.keys()), index=0, key="heat_theme")
-            heat_cmap = st.selectbox("Color map", ["coolwarm", "RdBu_r", "BrBG", "PiYG", "viridis", "plasma"], index=0)
-        with heat_col_2:
-            heat_width = st.slider("Heatmap width", 5.0, 18.0, 10.0, 0.5)
-            heat_height = st.slider("Heatmap height", 4.0, 18.0, 8.0, 0.5)
-        with heat_col_3:
-            heat_show_values = st.checkbox("Show correlation values", value=True)
-            heat_font_family = st.selectbox("Font family", ["Arial", "Times New Roman", "DejaVu Sans", "DejaVu Serif"], index=2, key="heat_font")
-
-        heat_title_font_size = st.slider("Heatmap title font size", 10, 36, 16, key="heat_title_font")
-        heat_tick_font_size = st.slider("Heatmap tick font size", 6, 24, 9, key="heat_tick_font")
-        heat_value_font_size = st.slider("Heatmap value font size", 6, 22, 8, key="heat_value_font")
-
-    if len(corr_numeric_cols) < 2:
-        st.warning("Please select at least two numeric variables for correlation analysis.")
-        corr_matrix = pd.DataFrame()
-        corr_pvalues = pd.DataFrame()
-    else:
-        corr_matrix, corr_pvalues = compute_correlation_matrix(filtered_df, corr_numeric_cols, corr_method, corr_decimal_digits)
-        st.markdown("#### Correlation Coefficients")
-        st.dataframe(corr_matrix, use_container_width=True)
-
-        st.markdown("#### Correlation p-values")
-        st.dataframe(corr_pvalues, use_container_width=True)
-
-        heatmap_fig = create_correlation_heatmap(
-            corr=corr_matrix,
-            title=f"{corr_method} Correlation Matrix",
-            figure_width=heat_width,
-            figure_height=heat_height,
-            cmap=heat_cmap,
-            theme_name=heat_theme,
-            font_family=heat_font_family,
-            title_font_size=heat_title_font_size,
-            tick_font_size=heat_tick_font_size,
-            value_font_size=heat_value_font_size,
-            show_values=heat_show_values,
-        )
-        st.pyplot(heatmap_fig)
-
-
-# =====================================================
-# TAB 5: MULTI-PANEL LINE CHART
+# TAB 4: MULTI-PANEL LINE CHART
 # =====================================================
 
 with tab_line:
@@ -1680,108 +1342,7 @@ with tab_line:
 
 
 # =====================================================
-# TAB 6: SCATTERPLOT
-# =====================================================
-
-with tab_scatter:
-    st.subheader("Scatterplot Panel: Dependent and Independent Variables")
-
-    scatter_setting_1, scatter_setting_2, scatter_setting_3 = st.columns(3)
-    with scatter_setting_1:
-        dep_index = preferred_option(numeric_candidates, ["Net Income", "Return on Asset (ROA)", "Total Assets"], fallback_index=0)
-        scatter_dependent = st.selectbox("Dependent variable", numeric_candidates, index=dep_index, key="scatter_dep")
-    with scatter_setting_2:
-        scatter_independent_options = [col for col in numeric_candidates if col != scatter_dependent]
-        scatter_independent = st.multiselect(
-            "Independent variables",
-            scatter_independent_options,
-            default=scatter_independent_options[:3],
-            key="scatter_ind",
-        )
-    with scatter_setting_3:
-        scatter_corr_method = st.selectbox("Correlation method", ["Pearson", "Spearman"], index=0, key="scatter_corr_method")
-        scatter_decimal_digits = st.slider("Decimal digits", 0, 8, 3, 1, key="scatter_digits")
-
-    scatter_style = st.expander("Scatterplot Settings", expanded=True)
-    with scatter_style:
-        sc_col_1, sc_col_2, sc_col_3 = st.columns(3)
-        with sc_col_1:
-            scatter_color_col = st.selectbox("Color points by category", ["None"] + columns, index=preferred_option(["None"] + columns, ["Ticker Code", "Year"], 0), key="scatter_color")
-            scatter_label_col = st.selectbox("Point label variable", ["None"] + columns, index=preferred_option(["None"] + columns, ["Ticker Code", "Company Name"], 0), key="scatter_label")
-            scatter_show_labels = st.checkbox("Show point labels", value=False, key="scatter_show_labels")
-        with sc_col_2:
-            scatter_theme = st.selectbox("Chart background theme", list(THEMES.keys()), index=0, key="scatter_theme")
-            scatter_palette = st.selectbox("Color palette", list(COLOR_PALETTES.keys()), index=0, key="scatter_palette")
-            scatter_font_family = st.selectbox("Font family", ["Arial", "Times New Roman", "DejaVu Sans", "DejaVu Serif"], index=2, key="scatter_font")
-        with sc_col_3:
-            scatter_marker_style = st.selectbox("Marker style", MARKERS, index=0, key="scatter_marker")
-            scatter_marker_size = st.slider("Marker size", 20, 500, 80, 10, key="scatter_marker_size")
-            scatter_marker_alpha = st.slider("Marker alpha", 0.1, 1.0, 0.80, 0.05, key="scatter_alpha")
-
-        scatter_add_regression = st.checkbox("Add simple regression line", value=True, key="scatter_reg_line")
-        scatter_show_grid = st.checkbox("Show grid", value=True, key="scatter_grid")
-        scatter_panel_columns = st.slider("Number of panel columns", 1, 4, 2, key="scatter_panel_cols")
-        scatter_fig_width = st.slider("Figure width", 6.0, 30.0, 15.0, 0.5, key="scatter_fig_width")
-        scatter_fig_height = st.slider("Figure height", 4.0, 30.0, 10.0, 0.5, key="scatter_fig_height")
-        scatter_title = st.text_area("Chart title", value="Scatterplot Panel of IDX Banking Financial Variables", height=68, key="scatter_title")
-        scatter_subtitle = st.text_input("Chart subtitle", value="Dependent and independent variable relationships from filtered data", key="scatter_subtitle")
-
-        scatter_title_font_size = st.slider("Main title font size", 10, 44, 18, key="scatter_title_font")
-        scatter_subtitle_font_size = st.slider("Subtitle font size", 8, 30, 11, key="scatter_subtitle_font")
-        scatter_panel_title_font_size = st.slider("Panel title font size", 8, 30, 13, key="scatter_panel_title_font")
-        scatter_axis_font_size = st.slider("Axis label font size", 8, 30, 12, key="scatter_axis_font")
-        scatter_tick_font_size = st.slider("Tick label font size", 6, 26, 10, key="scatter_tick_font")
-        scatter_legend_font_size = st.slider("Legend font size", 6, 24, 9, key="scatter_legend_font")
-        scatter_label_font_size = st.slider("Point label font size", 5, 22, 8, key="scatter_label_font")
-
-    if not scatter_independent:
-        st.warning("Please select at least one independent variable.")
-        scatter_corr_table = pd.DataFrame()
-    else:
-        scatter_corr_table = build_scatter_correlation_table(
-            filtered_df,
-            dependent_col=scatter_dependent,
-            independent_cols=scatter_independent,
-            method=scatter_corr_method,
-            decimal_digits=scatter_decimal_digits,
-        )
-        st.markdown("#### Correlation Table")
-        st.dataframe(make_arrow_safe_dataframe(scatter_corr_table), use_container_width=True)
-
-        scatter_fig = create_scatterplot_panel(
-            df=filtered_df,
-            dependent_col=scatter_dependent,
-            independent_cols=scatter_independent,
-            color_col=scatter_color_col,
-            label_col=scatter_label_col,
-            title=scatter_title,
-            subtitle=scatter_subtitle,
-            figure_width=scatter_fig_width,
-            figure_height=scatter_fig_height,
-            panel_columns=scatter_panel_columns,
-            theme_name=scatter_theme,
-            font_family=scatter_font_family,
-            palette_name=scatter_palette,
-            marker_style=scatter_marker_style,
-            marker_size=scatter_marker_size,
-            marker_alpha=scatter_marker_alpha,
-            show_labels=scatter_show_labels,
-            label_font_size=scatter_label_font_size,
-            add_regression_line=scatter_add_regression,
-            title_font_size=scatter_title_font_size,
-            subtitle_font_size=scatter_subtitle_font_size,
-            axis_font_size=scatter_axis_font_size,
-            tick_font_size=scatter_tick_font_size,
-            panel_title_font_size=scatter_panel_title_font_size,
-            legend_font_size=scatter_legend_font_size,
-            show_grid=scatter_show_grid,
-        )
-        st.pyplot(scatter_fig)
-
-
-
-# =====================================================
-# TAB 7: REGRESSION AND ASSUMPTION TESTS
+# TAB 5: REGRESSION AND ASSUMPTION TESTS
 # =====================================================
 
 with tab_regression:
@@ -1933,7 +1494,7 @@ with tab_regression:
                 outlier_df = pd.DataFrame()
 
 # =====================================================
-# TAB 8: EXPORT
+# TAB 6: EXPORT
 # =====================================================
 
 with tab_export:
@@ -1949,28 +1510,6 @@ with tab_export:
 
     st.markdown("#### Download PNG Charts")
 
-    if 'heatmap_fig' in locals() and not corr_matrix.empty:
-        export_heat_fig = create_correlation_heatmap(
-            corr=corr_matrix,
-            title=f"{corr_method} Correlation Matrix",
-            figure_width=heat_width,
-            figure_height=heat_height,
-            cmap=heat_cmap,
-            theme_name=heat_theme,
-            font_family=heat_font_family,
-            title_font_size=heat_title_font_size,
-            tick_font_size=heat_tick_font_size,
-            value_font_size=heat_value_font_size,
-            show_values=heat_show_values,
-        )
-        heat_png = fig_to_png_bytes(export_heat_fig, dpi=dpi, transparent_background=transparent_background)
-        st.download_button(
-            label=f"⬇️ Download Correlation Heatmap PNG ({dpi} DPI)",
-            data=heat_png,
-            file_name="statcal_online_idx_banking_correlation_heatmap.png",
-            mime="image/png",
-        )
-        plt.close(export_heat_fig)
 
     if 'chart_long_data' in locals() and isinstance(chart_long_data, pd.DataFrame) and not chart_long_data.empty and line_panel_variables:
         export_line_fig = create_panel_mean_line_chart(
@@ -2015,43 +1554,6 @@ with tab_export:
         )
         plt.close(export_line_fig)
 
-    if 'scatter_corr_table' in locals() and isinstance(scatter_corr_table, pd.DataFrame) and not scatter_corr_table.empty and scatter_independent:
-        export_scatter_fig = create_scatterplot_panel(
-            df=filtered_df,
-            dependent_col=scatter_dependent,
-            independent_cols=scatter_independent,
-            color_col=scatter_color_col,
-            label_col=scatter_label_col,
-            title=scatter_title,
-            subtitle=scatter_subtitle,
-            figure_width=scatter_fig_width,
-            figure_height=scatter_fig_height,
-            panel_columns=scatter_panel_columns,
-            theme_name=scatter_theme,
-            font_family=scatter_font_family,
-            palette_name=scatter_palette,
-            marker_style=scatter_marker_style,
-            marker_size=scatter_marker_size,
-            marker_alpha=scatter_marker_alpha,
-            show_labels=scatter_show_labels,
-            label_font_size=scatter_label_font_size,
-            add_regression_line=scatter_add_regression,
-            title_font_size=scatter_title_font_size,
-            subtitle_font_size=scatter_subtitle_font_size,
-            axis_font_size=scatter_axis_font_size,
-            tick_font_size=scatter_tick_font_size,
-            panel_title_font_size=scatter_panel_title_font_size,
-            legend_font_size=scatter_legend_font_size,
-            show_grid=scatter_show_grid,
-        )
-        scatter_png = fig_to_png_bytes(export_scatter_fig, dpi=dpi, transparent_background=transparent_background)
-        st.download_button(
-            label=f"⬇️ Download Scatterplot Panel PNG ({dpi} DPI)",
-            data=scatter_png,
-            file_name="statcal_online_idx_banking_scatterplot_panel.png",
-            mime="image/png",
-        )
-        plt.close(export_scatter_fig)
 
     if 'regression_model' in locals() and 'regression_residual_fig' in locals() and not regression_summary_table.empty:
         export_reg_fig = create_regression_diagnostic_figure(
@@ -2078,6 +1580,7 @@ with tab_export:
         "Application": f"{APP_NAME} - {APP_TITLE}",
         "Website": WEBSITE_URL,
         "STATCAL ONLINE Page": STATCAL_ONLINE_URL,
+        "Training Data URL": TRAINING_DATA_URL,
         "Source File": source_name,
         "Worksheet": sheet_name,
         "Rows Original": len(df),
@@ -2098,17 +1601,11 @@ with tab_export:
     if 'grouped_descriptive_stats' in locals() and isinstance(grouped_descriptive_stats, pd.DataFrame) and not grouped_descriptive_stats.empty:
         sheets_to_export["Grouped Descriptive"] = grouped_descriptive_stats
 
-    if 'corr_matrix' in locals() and isinstance(corr_matrix, pd.DataFrame) and not corr_matrix.empty:
-        sheets_to_export["Correlation Matrix"] = corr_matrix.reset_index().rename(columns={"index": "Variable"})
 
-    if 'corr_pvalues' in locals() and isinstance(corr_pvalues, pd.DataFrame) and not corr_pvalues.empty:
-        sheets_to_export["Correlation PValues"] = corr_pvalues.reset_index().rename(columns={"index": "Variable"})
 
     if 'chart_long_data' in locals() and isinstance(chart_long_data, pd.DataFrame) and not chart_long_data.empty:
         sheets_to_export["Line Chart Data"] = chart_long_data
 
-    if 'scatter_corr_table' in locals() and isinstance(scatter_corr_table, pd.DataFrame) and not scatter_corr_table.empty:
-        sheets_to_export["Scatter Correlation"] = scatter_corr_table
 
     if 'regression_summary_table' in locals() and isinstance(regression_summary_table, pd.DataFrame) and not regression_summary_table.empty:
         sheets_to_export["Regression Model Fit"] = regression_summary_table
