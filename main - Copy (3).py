@@ -334,39 +334,68 @@ def compute_grouped_descriptive_statistics(
     return result
 
 
+# =====================================================
+# LINE CHART
+# =====================================================
+
 @st.cache_data(ttl=3600, max_entries=20)
-def compute_correlation_matrix(
+def build_mean_line_long_data(
     df: pd.DataFrame,
+    x_col: str,
     numeric_cols: List[str],
-    method: str,
-    decimal_digits: int,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    numeric_df = pd.DataFrame({col: to_numeric_series(df[col]) for col in numeric_cols})
-    corr = numeric_df.corr(method=method.lower())
+    split_col: str,
+    sort_x: bool,
+) -> pd.DataFrame:
+    rows = []
+    for variable in numeric_cols:
+        use_cols = [x_col, variable]
+        use_split = split_col != "None" and split_col in df.columns
+        if use_split:
+            use_cols.append(split_col)
 
-    pvals = pd.DataFrame(np.nan, index=numeric_cols, columns=numeric_cols)
-    for row_var in numeric_cols:
-        for col_var in numeric_cols:
-            x = numeric_df[row_var]
-            y = numeric_df[col_var]
-            valid = pd.concat([x, y], axis=1).dropna()
-            if len(valid) < 3:
-                continue
-            try:
-                if method.lower() == "pearson":
-                    _, p = stats.pearsonr(valid.iloc[:, 0], valid.iloc[:, 1])
-                else:
-                    _, p = stats.spearmanr(valid.iloc[:, 0], valid.iloc[:, 1])
-                pvals.loc[row_var, col_var] = p
-            except Exception:
-                pvals.loc[row_var, col_var] = np.nan
+        temp = df[use_cols].copy()
+        temp[variable] = to_numeric_series(temp[variable])
+        temp = temp.dropna(subset=[x_col, variable])
+        if temp.empty:
+            continue
 
-    return corr.round(decimal_digits), pvals.round(decimal_digits)
+        if use_split:
+            grouped = temp.groupby([x_col, split_col], dropna=False)[variable].mean().reset_index()
+            grouped = grouped.rename(columns={variable: "Mean"})
+            grouped["Split"] = grouped[split_col].fillna("Missing").astype(str)
+        else:
+            grouped = temp.groupby(x_col, dropna=False)[variable].mean().reset_index()
+            grouped = grouped.rename(columns={variable: "Mean"})
+            grouped["Split"] = variable
+
+        grouped["Variable"] = variable
+        rows.append(grouped[[x_col, "Variable", "Split", "Mean"]])
+
+    if not rows:
+        return pd.DataFrame(columns=[x_col, "Variable", "Split", "Mean"])
+
+    result = pd.concat(rows, ignore_index=True)
+    if sort_x:
+        try:
+            result = result.sort_values(["Variable", "Split", x_col]).reset_index(drop=True)
+        except Exception:
+            result["__x_sort__"] = result[x_col].astype(str)
+            result = result.sort_values(["Variable", "Split", "__x_sort__"]).drop(columns="__x_sort__").reset_index(drop=True)
+    return result
 
 
-# =====================================================
-# CHART STYLE HELPER
-# =====================================================
+def pivot_for_variable(long_df: pd.DataFrame, x_col: str, variable: str) -> pd.DataFrame:
+    temp = long_df[long_df["Variable"] == variable].copy()
+    if temp.empty:
+        return pd.DataFrame()
+    pivot = temp.pivot_table(index=x_col, columns="Split", values="Mean", aggfunc="mean")
+    try:
+        pivot = pivot.sort_index()
+    except Exception:
+        ordered = sorted(pivot.index.tolist(), key=lambda x: str(x).lower())
+        pivot = pivot.loc[ordered]
+    return pivot
+
 
 def apply_common_chart_style(ax, theme: Dict[str, str], show_grid: bool) -> None:
     ax.set_facecolor(theme["axes_facecolor"])
@@ -385,53 +414,127 @@ def apply_common_chart_style(ax, theme: Dict[str, str], show_grid: bool) -> None
     ax.spines["left"].set_color(theme["spine_color"])
 
 
-
-# CORRELATION HEATMAP
-# =====================================================
-
-def create_correlation_heatmap(
-    corr: pd.DataFrame,
+def create_panel_mean_line_chart(
+    long_df: pd.DataFrame,
+    x_col: str,
+    panel_variables: List[str],
     title: str,
+    subtitle: str,
+    x_label: str,
+    y_label: str,
     figure_width: float,
     figure_height: float,
-    cmap: str,
+    panel_columns: int,
+    share_y_axis: bool,
     theme_name: str,
     font_family: str,
+    line_colors: Dict[str, str],
+    line_width: float,
+    show_markers: bool,
+    marker_style: str,
+    marker_size: int,
+    show_value_labels: bool,
+    value_label_decimal_digits: int,
+    compact_labels: bool,
     title_font_size: int,
+    subtitle_font_size: int,
+    axis_font_size: int,
     tick_font_size: int,
-    value_font_size: int,
-    show_values: bool,
+    legend_font_size: int,
+    value_label_font_size: int,
+    panel_title_font_size: int,
+    x_tick_rotation: int,
+    show_grid: bool,
+    legend_position: str,
 ) -> plt.Figure:
     plt.rcParams["font.family"] = font_family
     theme = get_theme(theme_name)
-    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+
+    n_panels = len(panel_variables)
+    ncols = max(1, min(panel_columns, n_panels))
+    nrows = math.ceil(n_panels / ncols)
+
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figure_width, figure_height), sharey=share_y_axis, squeeze=False)
     fig.patch.set_facecolor(theme["figure_facecolor"])
-    ax.set_facecolor(theme["axes_facecolor"])
 
-    im = ax.imshow(corr.values, cmap=cmap, vmin=-1, vmax=1)
-    ax.set_title(title, fontsize=title_font_size, fontweight="bold", color=theme["text_color"], pad=12)
+    legend_handles = []
+    legend_labels = []
 
-    ax.set_xticks(np.arange(len(corr.columns)))
-    ax.set_yticks(np.arange(len(corr.index)))
-    ax.set_xticklabels(corr.columns, rotation=45, ha="right", fontsize=tick_font_size, color=theme["text_color"])
-    ax.set_yticklabels(corr.index, fontsize=tick_font_size, color=theme["text_color"])
+    for panel_idx, variable in enumerate(panel_variables):
+        row = panel_idx // ncols
+        col = panel_idx % ncols
+        ax = axes[row][col]
 
-    if show_values:
-        for i in range(len(corr.index)):
-            for j in range(len(corr.columns)):
-                value = corr.iloc[i, j]
-                color = "white" if abs(value) > 0.55 else "black"
-                ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=value_font_size, color=color)
+        pivot = pivot_for_variable(long_df, x_col=x_col, variable=variable)
+        x_values = np.arange(len(pivot.index))
+        x_labels = format_x_labels(pivot.index.tolist())
 
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=tick_font_size, colors=theme["text_color"])
+        for series_name in pivot.columns:
+            y_values = pd.to_numeric(pivot[series_name], errors="coerce").to_numpy(dtype=float)
+            color = line_colors.get(str(series_name), "#1F4E79")
+            line, = ax.plot(
+                x_values,
+                y_values,
+                label=str(series_name),
+                color=color,
+                linewidth=line_width,
+                marker=marker_style if show_markers else None,
+                markersize=marker_size if show_markers else 0,
+                markeredgecolor="white",
+                markeredgewidth=0.6,
+            )
+            if str(series_name) not in legend_labels:
+                legend_handles.append(line)
+                legend_labels.append(str(series_name))
 
-    for spine in ax.spines.values():
-        spine.set_color(theme["spine_color"])
+            if show_value_labels:
+                for x, y in zip(x_values, y_values):
+                    if pd.isna(y) or not np.isfinite(y):
+                        continue
+                    ax.annotate(
+                        format_numeric_label(y, value_label_decimal_digits, compact=compact_labels),
+                        (x, y),
+                        textcoords="offset points",
+                        xytext=(0, 7),
+                        ha="center",
+                        fontsize=value_label_font_size,
+                        color=theme["text_color"],
+                    )
 
-    fig.tight_layout()
+        ax.set_title(str(variable), fontsize=panel_title_font_size, fontweight="bold", color=theme["text_color"], pad=10)
+        ax.set_xlabel(x_label, fontsize=axis_font_size, labelpad=8, color=theme["text_color"])
+        ax.set_ylabel(y_label, fontsize=axis_font_size, labelpad=8, color=theme["text_color"])
+        ax.set_xticks(x_values)
+        ax.set_xticklabels(x_labels, rotation=x_tick_rotation, ha="right" if x_tick_rotation > 0 else "center", fontsize=tick_font_size, color=theme["text_color"])
+        ax.tick_params(axis="y", labelsize=tick_font_size, colors=theme["text_color"])
+        apply_common_chart_style(ax, theme, show_grid)
+
+    for panel_idx in range(n_panels, nrows * ncols):
+        row = panel_idx // ncols
+        col = panel_idx % ncols
+        axes[row][col].axis("off")
+
+    fig.suptitle(title, fontsize=title_font_size, fontweight="bold", color=theme["text_color"], y=0.995)
+    if subtitle.strip():
+        fig.text(0.5, 0.965, subtitle, ha="center", va="top", fontsize=subtitle_font_size, color=theme["text_color"])
+
+    if legend_handles:
+        if legend_position == "Outside right":
+            legend = fig.legend(legend_handles, legend_labels, loc="upper left", bbox_to_anchor=(1.005, 0.94), frameon=True, fontsize=legend_font_size)
+            fig.tight_layout(rect=[0, 0, 0.86, 0.93])
+        elif legend_position == "Bottom":
+            legend = fig.legend(legend_handles, legend_labels, loc="lower center", bbox_to_anchor=(0.5, -0.005), ncol=min(4, len(legend_labels)), frameon=True, fontsize=legend_font_size)
+            fig.tight_layout(rect=[0, 0.06, 1, 0.93])
+        else:
+            legend = fig.legend(legend_handles, legend_labels, loc="upper right", frameon=True, fontsize=legend_font_size)
+            fig.tight_layout(rect=[0, 0, 1, 0.93])
+        legend.get_frame().set_alpha(0.88)
+        for text in legend.get_texts():
+            text.set_color(theme["text_color"])
+    else:
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
+
     return fig
-
 
 
 # =====================================================
@@ -924,8 +1027,8 @@ with st.container():
         st.subheader(APP_TITLE)
         st.caption(
             "A Python Streamlit application for exploring IDX banking financial data through data filtering, "
-            "descriptive statistics, grouped summaries, correlation matrices, linear regression with assumption testing, "
-            "and exportable analytical outputs."
+            "descriptive statistics, grouped summaries, publication-ready multi-panel line charts, "
+            "linear regression with assumption testing, and exportable analytical outputs."
         )
 
 st.markdown(
@@ -934,7 +1037,7 @@ st.markdown(
     **STATCAL ONLINE Page:** [{STATCAL_ONLINE_URL}]({STATCAL_ONLINE_URL})  
     **Data Source / Training Data:** [Open Google Drive Folder]({TRAINING_DATA_URL})  
     **{APP_UPDATED}**  
-    **Purpose:** Explore IDX banking financial data by year and ticker code, create descriptive tables, correlation matrices, regression analysis, assumption tests, and export outputs for academic reporting.
+    **Purpose:** Explore IDX banking financial data by year and ticker code, create descriptive tables, multi-panel line charts, regression analysis, assumption tests, and export outputs for academic reporting.
 
     ---
     """
@@ -945,11 +1048,11 @@ st.markdown(
 # TABS
 # =====================================================
 
-tab_data, tab_uni, tab_group, tab_corr, tab_regression, tab_export = st.tabs([
+tab_data, tab_uni, tab_group, tab_line, tab_regression, tab_export = st.tabs([
     "1. Data & Filters",
     "2. Univariate Descriptive",
     "3. Grouped Descriptive",
-    "4. Correlation Matrix",
+    "4. Multi-Panel Line Chart",
     "5. Regression & Assumption Tests",
     "6. Export Charts & Excel",
 ])
@@ -1113,68 +1216,129 @@ with tab_group:
 
 
 # =====================================================
-# TAB 4: CORRELATION MATRIX
+# TAB 4: MULTI-PANEL LINE CHART
 # =====================================================
 
-with tab_corr:
-    st.subheader("Correlation Matrix")
+with tab_line:
+    st.subheader("Multi-Panel Mean Line Chart")
 
-    corr_settings_1, corr_settings_2, corr_settings_3 = st.columns([3, 1, 1])
-    with corr_settings_1:
-        corr_numeric_cols = st.multiselect(
-            "Select numeric variables for correlation matrix",
+    line_setting_1, line_setting_2, line_setting_3 = st.columns(3)
+    with line_setting_1:
+        x_index = preferred_option(columns, ["Year", "Tahun", "Date", "Time", "Period", "Periode"], fallback_index=0)
+        line_x_col = st.selectbox("X-axis variable", columns, index=x_index, key="line_x_col")
+        line_numeric_cols = st.multiselect(
+            "Panel variables / numeric variables",
             numeric_candidates,
-            default=default_numeric_columns(numeric_candidates),
-            key="corr_numeric_cols",
+            default=default_numeric_columns(numeric_candidates)[:4],
+            key="line_numeric_cols",
         )
-    with corr_settings_2:
-        corr_method = st.selectbox("Correlation method", ["Pearson", "Spearman"], index=0)
-    with corr_settings_3:
-        corr_decimal_digits = st.slider("Decimal digits", 0, 8, 3, 1, key="corr_decimal_digits")
+    with line_setting_2:
+        split_options = ["None"] + columns
+        split_index = preferred_option(split_options, ["Ticker Code", "Company Name", "Year"], fallback_index=0)
+        line_split_col = st.selectbox("Split lines by category", split_options, index=split_index, key="line_split_col")
+        line_sort_x = st.checkbox("Sort X-axis", value=True, key="line_sort_x")
+    with line_setting_3:
+        line_max_panels = st.slider("Maximum panels", 1, 20, min(6, max(1, len(line_numeric_cols))), key="line_max_panels")
+        line_panel_columns = st.slider("Number of panel columns", 1, 4, min(2, max(1, line_max_panels)), key="line_panel_cols")
+        line_share_y_axis = st.checkbox("Share Y-axis across panels", value=False, key="line_share_y")
 
-    heat_settings = st.expander("Heatmap Settings", expanded=True)
-    with heat_settings:
-        heat_col_1, heat_col_2, heat_col_3 = st.columns(3)
-        with heat_col_1:
-            heat_theme = st.selectbox("Heatmap theme", list(THEMES.keys()), index=0, key="heat_theme")
-            heat_cmap = st.selectbox("Color map", ["coolwarm", "RdBu_r", "BrBG", "PiYG", "viridis", "plasma"], index=0)
-        with heat_col_2:
-            heat_width = st.slider("Heatmap width", 5.0, 18.0, 10.0, 0.5)
-            heat_height = st.slider("Heatmap height", 4.0, 18.0, 8.0, 0.5)
-        with heat_col_3:
-            heat_show_values = st.checkbox("Show correlation values", value=True)
-            heat_font_family = st.selectbox("Font family", ["Arial", "Times New Roman", "DejaVu Sans", "DejaVu Serif"], index=2, key="heat_font")
+    style_expander = st.expander("Line Chart Settings", expanded=True)
+    with style_expander:
+        style_col_1, style_col_2, style_col_3 = st.columns(3)
+        with style_col_1:
+            line_font_family = st.selectbox("Font family", ["Arial", "Times New Roman", "DejaVu Sans", "DejaVu Serif"], index=2, key="line_font")
+            line_theme = st.selectbox("Chart background theme", list(THEMES.keys()), index=0, key="line_theme")
+            line_palette = st.selectbox("Color palette", list(COLOR_PALETTES.keys()), index=0, key="line_palette")
+        with style_col_2:
+            line_fig_width = st.slider("Figure width", 6.0, 30.0, 15.0, 0.5, key="line_fig_width")
+            line_fig_height = st.slider("Figure height", 4.0, 30.0, 10.0, 0.5, key="line_fig_height")
+            line_width = st.slider("Line width", 0.5, 8.0, 2.4, 0.1, key="line_width")
+        with style_col_3:
+            line_show_markers = st.checkbox("Add markers to lines", value=True, key="line_markers")
+            line_marker_style = st.selectbox("Marker style", MARKERS, index=0, key="line_marker_style")
+            line_marker_size = st.slider("Marker size", 2, 18, 6, key="line_marker_size")
 
-        heat_title_font_size = st.slider("Heatmap title font size", 10, 36, 16, key="heat_title_font")
-        heat_tick_font_size = st.slider("Heatmap tick font size", 6, 24, 9, key="heat_tick_font")
-        heat_value_font_size = st.slider("Heatmap value font size", 6, 22, 8, key="heat_value_font")
+        line_title = st.text_area("Chart title", value="Mean Trend of IDX Banking Financial Variables", height=68, key="line_title")
+        line_subtitle = st.text_input("Chart subtitle", value="Multi-panel chart based on mean values from filtered IDX banking data", key="line_subtitle")
+        line_x_label = st.text_input("X-axis label", value=line_x_col, key="line_x_label")
+        line_y_label = st.text_input("Y-axis label", value="Mean", key="line_y_label")
 
-    if len(corr_numeric_cols) < 2:
-        st.warning("Please select at least two numeric variables for correlation analysis.")
-        corr_matrix = pd.DataFrame()
-        corr_pvalues = pd.DataFrame()
+        line_show_value_labels = st.checkbox("Show mean values on chart", value=False, key="line_show_value")
+        line_compact_labels = st.checkbox("Use compact value labels (K/M/B/T)", value=True, key="line_compact")
+        line_x_tick_rotation = st.slider("X-axis label rotation", 0, 90, 0, 5, key="line_x_rot")
+        line_show_grid = st.checkbox("Show grid", value=True, key="line_grid")
+        line_legend_position = st.selectbox("Legend position", ["Outside right", "Bottom", "Best"], index=0, key="line_legend")
+
+        line_title_font_size = st.slider("Main title font size", 10, 44, 18, key="line_title_font")
+        line_subtitle_font_size = st.slider("Subtitle font size", 8, 30, 11, key="line_subtitle_font")
+        line_panel_title_font_size = st.slider("Panel title font size", 8, 30, 13, key="line_panel_title_font")
+        line_axis_font_size = st.slider("Axis label font size", 8, 30, 12, key="line_axis_font")
+        line_tick_font_size = st.slider("Tick label font size", 6, 26, 10, key="line_tick_font")
+        line_legend_font_size = st.slider("Legend font size", 6, 24, 9, key="line_legend_font")
+        line_value_label_font_size = st.slider("Value label font size", 5, 22, 8, key="line_value_font")
+
+    line_panel_variables = line_numeric_cols[:line_max_panels] if line_numeric_cols else []
+    if not line_panel_variables:
+        st.warning("Please select at least one numeric variable for the line chart.")
+        chart_long_data = pd.DataFrame()
     else:
-        corr_matrix, corr_pvalues = compute_correlation_matrix(filtered_df, corr_numeric_cols, corr_method, corr_decimal_digits)
-        st.markdown("#### Correlation Coefficients")
-        st.dataframe(corr_matrix, use_container_width=True)
-
-        st.markdown("#### Correlation p-values")
-        st.dataframe(corr_pvalues, use_container_width=True)
-
-        heatmap_fig = create_correlation_heatmap(
-            corr=corr_matrix,
-            title=f"{corr_method} Correlation Matrix",
-            figure_width=heat_width,
-            figure_height=heat_height,
-            cmap=heat_cmap,
-            theme_name=heat_theme,
-            font_family=heat_font_family,
-            title_font_size=heat_title_font_size,
-            tick_font_size=heat_tick_font_size,
-            value_font_size=heat_value_font_size,
-            show_values=heat_show_values,
+        chart_long_data = build_mean_line_long_data(
+            filtered_df,
+            x_col=line_x_col,
+            numeric_cols=line_panel_variables,
+            split_col=line_split_col,
+            sort_x=line_sort_x,
         )
-        st.pyplot(heatmap_fig)
+
+        if chart_long_data.empty:
+            st.error("The mean line chart data is empty. Please adjust variables or filters.")
+        else:
+            line_series = sorted(chart_long_data["Split"].dropna().astype(str).unique().tolist(), key=lambda x: str(x).lower())
+            palette = get_palette_color_list(line_palette)
+            line_colors: Dict[str, str] = {}
+            st.markdown("#### Line Colors")
+            color_cols = st.columns(4)
+            for idx, series_name in enumerate(line_series[:32]):
+                with color_cols[idx % 4]:
+                    line_colors[str(series_name)] = st.color_picker(f"{series_name}", palette[idx % len(palette)], key=f"line_color_{idx}_{series_name}")
+
+            with st.expander("Mean line chart data preview", expanded=False):
+                st.dataframe(make_arrow_safe_dataframe(chart_long_data.head(300)), use_container_width=True)
+
+            line_fig = create_panel_mean_line_chart(
+                long_df=chart_long_data,
+                x_col=line_x_col,
+                panel_variables=line_panel_variables,
+                title=line_title,
+                subtitle=line_subtitle,
+                x_label=line_x_label,
+                y_label=line_y_label,
+                figure_width=line_fig_width,
+                figure_height=line_fig_height,
+                panel_columns=line_panel_columns,
+                share_y_axis=line_share_y_axis,
+                theme_name=line_theme,
+                font_family=line_font_family,
+                line_colors=line_colors,
+                line_width=line_width,
+                show_markers=line_show_markers,
+                marker_style=line_marker_style,
+                marker_size=line_marker_size,
+                show_value_labels=line_show_value_labels,
+                value_label_decimal_digits=3,
+                compact_labels=line_compact_labels,
+                title_font_size=line_title_font_size,
+                subtitle_font_size=line_subtitle_font_size,
+                axis_font_size=line_axis_font_size,
+                tick_font_size=line_tick_font_size,
+                legend_font_size=line_legend_font_size,
+                value_label_font_size=line_value_label_font_size,
+                panel_title_font_size=line_panel_title_font_size,
+                x_tick_rotation=line_x_tick_rotation,
+                show_grid=line_show_grid,
+                legend_position=line_legend_position,
+            )
+            st.pyplot(line_fig)
 
 
 # =====================================================
@@ -1346,28 +1510,50 @@ with tab_export:
 
     st.markdown("#### Download PNG Charts")
 
-    if 'heatmap_fig' in locals() and not corr_matrix.empty:
-        export_heat_fig = create_correlation_heatmap(
-            corr=corr_matrix,
-            title=f"{corr_method} Correlation Matrix",
-            figure_width=heat_width,
-            figure_height=heat_height,
-            cmap=heat_cmap,
-            theme_name=heat_theme,
-            font_family=heat_font_family,
-            title_font_size=heat_title_font_size,
-            tick_font_size=heat_tick_font_size,
-            value_font_size=heat_value_font_size,
-            show_values=heat_show_values,
+
+    if 'chart_long_data' in locals() and isinstance(chart_long_data, pd.DataFrame) and not chart_long_data.empty and line_panel_variables:
+        export_line_fig = create_panel_mean_line_chart(
+            long_df=chart_long_data,
+            x_col=line_x_col,
+            panel_variables=line_panel_variables,
+            title=line_title,
+            subtitle=line_subtitle,
+            x_label=line_x_label,
+            y_label=line_y_label,
+            figure_width=line_fig_width,
+            figure_height=line_fig_height,
+            panel_columns=line_panel_columns,
+            share_y_axis=line_share_y_axis,
+            theme_name=line_theme,
+            font_family=line_font_family,
+            line_colors=line_colors,
+            line_width=line_width,
+            show_markers=line_show_markers,
+            marker_style=line_marker_style,
+            marker_size=line_marker_size,
+            show_value_labels=line_show_value_labels,
+            value_label_decimal_digits=3,
+            compact_labels=line_compact_labels,
+            title_font_size=line_title_font_size,
+            subtitle_font_size=line_subtitle_font_size,
+            axis_font_size=line_axis_font_size,
+            tick_font_size=line_tick_font_size,
+            legend_font_size=line_legend_font_size,
+            value_label_font_size=line_value_label_font_size,
+            panel_title_font_size=line_panel_title_font_size,
+            x_tick_rotation=line_x_tick_rotation,
+            show_grid=line_show_grid,
+            legend_position=line_legend_position,
         )
-        heat_png = fig_to_png_bytes(export_heat_fig, dpi=dpi, transparent_background=transparent_background)
+        line_png = fig_to_png_bytes(export_line_fig, dpi=dpi, transparent_background=transparent_background)
         st.download_button(
-            label=f"⬇️ Download Correlation Heatmap PNG ({dpi} DPI)",
-            data=heat_png,
-            file_name="statcal_online_idx_banking_correlation_heatmap.png",
+            label=f"⬇️ Download Multi-Panel Line Chart PNG ({dpi} DPI)",
+            data=line_png,
+            file_name="statcal_online_idx_banking_mean_line_panel_chart.png",
             mime="image/png",
         )
-        plt.close(export_heat_fig)
+        plt.close(export_line_fig)
+
 
     if 'regression_model' in locals() and 'regression_residual_fig' in locals() and not regression_summary_table.empty:
         export_reg_fig = create_regression_diagnostic_figure(
@@ -1415,11 +1601,11 @@ with tab_export:
     if 'grouped_descriptive_stats' in locals() and isinstance(grouped_descriptive_stats, pd.DataFrame) and not grouped_descriptive_stats.empty:
         sheets_to_export["Grouped Descriptive"] = grouped_descriptive_stats
 
-    if 'corr_matrix' in locals() and isinstance(corr_matrix, pd.DataFrame) and not corr_matrix.empty:
-        sheets_to_export["Correlation Matrix"] = corr_matrix.reset_index().rename(columns={"index": "Variable"})
 
-    if 'corr_pvalues' in locals() and isinstance(corr_pvalues, pd.DataFrame) and not corr_pvalues.empty:
-        sheets_to_export["Correlation PValues"] = corr_pvalues.reset_index().rename(columns={"index": "Variable"})
+
+    if 'chart_long_data' in locals() and isinstance(chart_long_data, pd.DataFrame) and not chart_long_data.empty:
+        sheets_to_export["Line Chart Data"] = chart_long_data
+
 
     if 'regression_summary_table' in locals() and isinstance(regression_summary_table, pd.DataFrame) and not regression_summary_table.empty:
         sheets_to_export["Regression Model Fit"] = regression_summary_table
